@@ -1,0 +1,245 @@
+name: Code Review
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      level:
+        description: 'Review level (quick/standard/full)'
+        required: false
+        default: 'standard'
+        type: choice
+        options:
+          - quick
+          - standard
+          - full
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
+
+jobs:
+  # Quick format check - runs first, fast feedback
+  quick-check:
+    name: Quick Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort
+
+      - name: Run quick check
+        run: |
+          chmod +x ./scripts/code-reviewer.sh
+          ./scripts/code-reviewer.sh --level quick --target backend --output text
+        continue-on-error: true
+
+  # Backend review
+  backend-review:
+    name: Backend Code Review
+    runs-on: ubuntu-latest
+    needs: quick-check
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run backend review
+        id: backend-review
+        run: |
+          chmod +x ./scripts/code-reviewer.sh
+          ./scripts/code-reviewer.sh \
+            --level ${{ github.event.inputs.level || 'standard' }} \
+            --target backend \
+            --output junit \
+            -f backend-results.xml
+        continue-on-error: true
+
+      - name: Upload backend results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-review-results
+          path: backend-results.xml
+          retention-days: 30
+
+      - name: Publish backend test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Backend Review Results
+          path: backend-results.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Check backend review status
+        if: steps.backend-review.outcome == 'failure'
+        run: |
+          echo "::warning::Backend code review found issues"
+          exit 1
+
+  # Frontend review
+  frontend-review:
+    name: Frontend Code Review
+    runs-on: ubuntu-latest
+    needs: quick-check
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend review
+        id: frontend-review
+        run: |
+          chmod +x ./scripts/code-reviewer.sh
+          ./scripts/code-reviewer.sh \
+            --level ${{ github.event.inputs.level || 'standard' }} \
+            --target frontend \
+            --output junit \
+            -f frontend-results.xml
+        continue-on-error: true
+
+      - name: Upload frontend results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-review-results
+          path: frontend-results.xml
+          retention-days: 30
+
+      - name: Publish frontend test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Frontend Review Results
+          path: frontend-results.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Check frontend review status
+        if: steps.frontend-review.outcome == 'failure'
+        run: |
+          echo "::warning::Frontend code review found issues"
+          exit 1
+
+  # Full review - only on main branch or manual trigger
+  full-review:
+    name: Full Code Review
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: [backend-review, frontend-review]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install all dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          cd frontend && npm ci
+
+      - name: Run full review
+        id: full-review
+        run: |
+          chmod +x ./scripts/code-reviewer.sh
+          ./scripts/code-reviewer.sh \
+            --level full \
+            --target all \
+            --output junit \
+            -f full-results.xml
+        continue-on-error: true
+
+      - name: Upload full results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-review-results
+          path: full-results.xml
+          retention-days: 30
+
+      - name: Publish full test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Full Review Results
+          path: full-results.xml
+          reporter: java-junit
+          fail-on-error: false
+
+  # Summary job
+  review-summary:
+    name: Review Summary
+    runs-on: ubuntu-latest
+    needs: [backend-review, frontend-review]
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: '*-review-results'
+          merge-multiple: true
+
+      - name: Generate summary
+        run: |
+          echo "## Code Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ needs.backend-review.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ${{ needs.frontend-review.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "Review results are available in the workflow artifacts." >> $GITHUB_STEP_SUMMARY
+
+      - name: Check overall status
+        if: needs.backend-review.result == 'failure' || needs.frontend-review.result == 'failure'
+        run: |
+          echo "::error::Code review failed. Please check the review results."
+          exit 1

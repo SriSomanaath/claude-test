@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.env
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage_html/
+test.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Mypy
+.mypy_cache/
+
+# Misc
+*.log
+*.sqlite3
